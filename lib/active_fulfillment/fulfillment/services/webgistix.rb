@@ -1,12 +1,12 @@
 module ActiveMerchant
   module Fulfillment
     class WebgistixService < Service
-      TEST_URL = 'https://www.webgistix.com/XML/shippingTest.asp'
-      LIVE_URL = 'https://www.webgistix.com/XML/API.asp'
+      TEST_URL = 'http://www.webgistix.com/XML/shippingTest.asp'
+      LIVE_URL = 'http://www.webgistix.com/XML/API.asp'
       
       SUCCESS, FAILURE = 'True', 'False'
-      SUCCESS_MESSAGE = 'Successfully submitted the order'
-      FAILURE_MESSAGE = 'Failed to submit the order'
+      SUCCESS_MESSAGE = 'Successfull.'
+      FAILURE_MESSAGE = 'Failed.'
       INVALID_LOGIN = 'Access Denied'
       
       # The first is the label, and the last is the code
@@ -48,21 +48,52 @@ module ActiveMerchant
         ].inject(ActiveSupport::OrderedHash.new){|h, (k,v)| h[k] = v; h}
       end
       
-      # Pass in the login and password for the shipwire account.
+      # Pass in the customer_id and password for the shipwire account.
       # Optionally pass in the :test => true to force test mode
       def initialize(options = {})
-        requires!(options, :login, :password)
+        requires!(options, :customer_id, :password)
         super
-        @url = test? ? TEST_URL : LIVE_URL
       end
 
       def fulfill(order_id, shipping_address, line_items, options = {})  
-        requires!(options, :shipping_method) 
-        commit build_fulfillment_request(order_id, shipping_address, line_items, options)
+        requires!(options, :shipping_method)
+        @url = test? ? TEST_URL : LIVE_URL
+        commit :fulfillment, build_fulfillment_request(order_id, shipping_address, line_items, options)
       end
       
-      def valid_credentials?
+      def inventory
+        @url = "http://www.webgistix.com/XML/InventorySvc.asp"
+        commit :inventory, build_inventory_request#(options ={})
+      end
+      
+      def track(orders, options = {}) #orders is array of orders to be track.
+        requires!(options, :username)
+        @url = "http://www.webgistix.com/XML/TrackingSvc.asp"
+        commit :tracking, build_track_order_request(orders, options)
+      end
+      
+      def create_item(items, options = {}) #items is array of items
+        @url = "http://www.webgistix.com/XML/createItem.asp"
+        commit :creation, build_create_item_request(items, options)
+      end
+      
+      def valid_credentials_for_fulfill?
         response = fulfill('', {}, [], :shipping_method => '')
+        response.message != INVALID_LOGIN
+      end
+
+      def valid_credentials_for_inventory?
+        response = inventory
+        response.message != INVALID_LOGIN
+      end
+      
+      def valid_credentials_for_tracking?(options = {})
+        response = track([], options)
+        response.message != INVALID_LOGIN
+      end
+      
+      def valid_credentials_for_creation?
+        response = create_item([], {})
         response.message != INVALID_LOGIN
       end
    
@@ -71,97 +102,74 @@ module ActiveMerchant
       end
 
       private
-      #<?xml version="1.0"?> 
-      # <OrderXML> 
-      #   <Password>Webgistix</Password> 
-      #   <CustomerID>3</CustomerID> 
-      #   <Order> 
-      #     <ReferenceNumber></ReferenceNumber> 
-      #     <Company>Test Company</Company> 
-      #     <Name>Joe Smith</Name> 
-      #     <Address1>123 Main St.</Address1> 
-      #     <Address2></Address2> 
-      #     <Address3></Address3> 
-      #     <City>Olean</City> 
-      #     <State>NY</State> 
-      #     <ZipCode>14760</ZipCode> 
-      #     <Country>United States</Country> 
-      #     <Email>info@webgistix.com</Email> 
-      #     <Phone>1-123-456-7890</Phone> 
-      #     <ShippingInstructions>Ground</ShippingInstructions> 
-      #     <OrderComments>Test Order</OrderComments> 
-      #     <Approve>0</Approve> 
-      #     <Item> 
-      #      <ItemID>testitem</ItemID> 
-      #      <ItemQty>2</ItemQty> 
-      #     </Item> 
-      #   </Order> 
-      # </OrderXML>
+      
       def build_fulfillment_request(order_id, shipping_address, line_items, options)
-        xml = Builder::XmlMarkup.new :indent => 2
-        xml.instruct!
-        xml.tag! 'OrderXML' do
-          add_credentials(xml)
-          add_order(xml, order_id, shipping_address, line_items, options) 
-        end
-        xml.target!
+        address_xml = <<-EOS
+          <?xml version="1.0"?> 
+          <OrderXML> 
+            <Password>#{@options[:password]}</Password> 
+            <CustomerID>#{@options[:customer_id]}</CustomerID> 
+            <Order> 
+              <ReferenceNumber>#{order_id}</ReferenceNumber> 
+              <Company>#{shipping_address[:company]}</Company> 
+              <Name>#{shipping_address[:name]}</Name> 
+              <Address1>#{shipping_address[:address1]}</Address1>
+              <City>#{shipping_address[:city]}</City> 
+              <State>#{shipping_address[:state]}</State> 
+              <ZipCode>#{shipping_address[:zip]}</ZipCode> 
+              <Country>#{shipping_address[:country]}</Country> 
+              <Phone>#{shipping_address[:phone]}</Phone>
+        EOS
+        address_xml += "<Address2>#{shipping_address[:address2]}</Address2>" if shipping_address[:address2]
+        address_xml += "<Address3>#{shipping_address[:address3]}</Address3>" if shipping_address[:address3]      
+        other_info_xml = <<-EOS     
+          <Email>#{options[:email]}</Email>      
+          <ShippingInstructions>#{options[:shipping_method]}</ShippingInstructions> 
+          <Approve>1</Approve>
+        EOS
+        address_xml += other_info_xml      
+        address_xml += "<OrderComments>#{options[:order_comments]}</OrderComments>" if options[:order_comments]
+        line_items.each {|item| address_xml += "<Item><ItemID>#{item[:sku]}</ItemID><ItemQty>#{item[:quantity]}</ItemQty></Item>"}
+        xml = address_xml + "</Order></OrderXML>"
       end
       
-      def add_credentials(xml)
-        xml.tag! 'CustomerID', @options[:login]
-        xml.tag! 'Password', @options[:password]
-      end
-
-      def add_order(xml, order_id, shipping_address, line_items, options)
-        xml.tag! 'Order' do
-          xml.tag! 'ReferenceNumber', order_id
-          xml.tag! 'ShippingInstructions', options[:shipping_method]
-          xml.tag! 'Approve', 1
-          xml.tag! 'OrderComments', options[:comment] unless options[:comment].blank?
-    
-          add_address(xml, shipping_address, options)
-
-          Array(line_items).each_with_index do |line_item, index|
-            add_item(xml, line_item, index)
-          end
-        end
+      def build_inventory_request
+        xml = <<-EOS
+          <?xml version="1.0"?> 
+          <InventoryXML> 
+            <Password>#{@options[:password]}</Password> 
+            <CustomerID>#{@options[:customer_id]}</CustomerID> 
+          </InventoryXML>
+        EOS
       end
       
-      def add_address(xml, address, options)
-        xml.tag! 'Name', address[:name]
-        xml.tag! 'Address1', address[:address1]
-        xml.tag! 'Address2', address[:address2] unless address[:address2].blank?
-        xml.tag! 'Address3', address[:address3] unless address[:address3].blank?
-        xml.tag! 'City', address[:city]
-        xml.tag! 'State', address[:state]
-        xml.tag! 'ZipCode', address[:zip]
-        xml.tag! 'Company', address[:company]
-          
-        unless address[:country].blank?
-          country = Country.find(address[:country])
-          xml.tag! 'Country', country.name
-        end
-        
-        xml.tag! 'Phone', address[:phone]
-        xml.tag! 'Email', options[:email] unless options[:email].blank?
+      def build_track_order_request(orders, options)
+        credentials_xml = <<-EOS
+        <?xml version="1.0"?> 
+        <TrackingXML> 
+          <Username>#{options[:username]}</Username> 
+          <Password>#{@options[:password]}</Password> 
+          <Customer>#{@options[:customer_id]}</Customer> 
+        EOS
+        orders.each {|order| credentials_xml += "<Tracking><Order>#{order[:order_id]}</Order></Tracking>"}
+        xml = credentials_xml + "</TrackingXML>"
+      end
+      
+      def build_create_item_request(items, options)
+        credentials_xml = <<-EOS
+          <?xml version="1.0"?> 
+          <ItemXML> 
+            <Password>#{@options[:password]}</Password> 
+            <Customer>#{@options[:customer_id]}</Customer> 
+         EOS
+         items.each {|item| credentials_xml += "<Item><ItemID>#{item[:sku]}</ItemID><ShortDescription>#{item[:description]}</ShortDescription><Category>#{item[:category]}</Category><UnitPrice>#{item[:unit_price]}</UnitPrice></Item>" }
+         xml = credentials_xml + "</ItemXML>"
       end
 
-      def add_item(xml, item, index)
-        xml.tag! 'Item' do
-          xml.tag! 'ItemID', item[:sku] unless item[:sku].blank?
-          xml.tag! 'ItemQty', item[:quantity] unless item[:quantity].blank?
-        end
-      end
-
-      def commit(request)
-        @response = parse(ssl_post(@url, request,
-                            'EndPointURL'  => @url,
-                            'Content-Type' => 'text/xml; charset="utf-8"')
-                         )
-        
-        Response.new(success?(@response), message_from(@response), @response, 
-          :test => test?
-        )
+      def commit(action, request)
+        p request
+        @response = parse_response(action, ssl_post(@url, request, 'EndPointURL'  => @url, 'Content-Type' => 'text/xml; charset="utf-8"'))
+        Response.new(success?(@response), message_from(@response), @response, :test => test?)
       end
       
       def success?(response)
@@ -178,7 +186,70 @@ module ActiveMerchant
         end
       end
       
-      def parse(xml)
+      def parse_response(action, data)
+        case action
+        when :fulfillment
+          parse_fulfillment_response(data)        
+        when :inventory
+          parse_inventory_response(data)
+        when :tracking
+          parse_tracking_response(data)
+        when :creation
+          parse_creation_response(data)
+        else
+          raise ArgumentError, "Unknown action #{action}"
+        end
+      end
+      
+      def parse_fulfillment_response(xml)
+        response = {}
+        
+        begin 
+          document = REXML::Document.new("<response>#{xml}</response>")
+        rescue REXML::ParseException
+          response[:success] = FAILURE
+          return response
+        end
+        # Fetch the errors
+        document.root.elements.to_a("Error").each_with_index do |e, i|
+          response["error_#{i}".to_sym] = e.text
+        end
+        # Check if completed
+        if completed = REXML::XPath.first(document, '//Completed')
+          completed.elements.each do |e|
+            response[e.name.underscore.to_sym] = e.text
+          end
+        else
+          response[:success] = FAILURE
+        end  
+        response
+      end
+      
+      def parse_inventory_response(xml)
+        response = {}
+        begin
+          document = REXML::Document.new("<response>#{xml}</response>")
+        rescue REXML::ParseException
+          response[:success] = FAILURE
+          return response
+        end
+        
+        #Fetch the errors
+        document.root.elements.to_a("Error").each_with_index do |e, i|
+          response["error_#{i}".to_sym] = e.text
+        end
+        
+        if REXML::XPath.first(document, '//InventoryXML')
+          result = Hash.from_xml("<response>#{xml}</response>")
+          response[:success] = SUCCESS
+          response.merge!(result)
+        else
+          response[:success] = FAILURE
+        end
+        response
+      end
+      
+      def parse_tracking_response(xml)
         response = {}
         
         begin 
@@ -193,16 +264,36 @@ module ActiveMerchant
         end
         
         # Check if completed
-        if completed = REXML::XPath.first(document, '//Completed')
-          completed.elements.each do |e|
-            response[e.name.underscore.to_sym] = e.text
-          end
+        if REXML::XPath.first(document, '//Orders')
+          result = Hash.from_xml("<response>#{xml}</response>")
+          response[:success] = SUCCESS
+          response.merge!(result)
         else
           response[:success] = FAILURE
-        end
-        
+        end        
         response
       end
+      
+      def parse_creation_response(xml)
+        response = {}
+        begin 
+          document = REXML::Document.new("<response>#{xml}</response>")
+        rescue REXML::ParseException
+          response[:success] = FAILURE
+          return response
+        end
+        # Fetch the errors
+        document.root.elements.to_a("Error").each_with_index do |e, i|
+          response["error_#{i}".to_sym] = e.text
+        end
+        
+        result = Hash.from_xml("<response>#{xml}</response>")
+        response[:success] = SUCCESS
+        response.merge!(result)
+      end
+      
+      
+      
     end
   end
 end
